@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using UnityEngine;
 using UnityEditor;
 using UnityEditor.Compilation;
+using UnityEditorAssembly = UnityEditor.Compilation.Assembly;
 
 namespace FinalFrame.EditorTool {
 
@@ -102,16 +103,23 @@ namespace FinalFrame.EditorTool {
             var model = GetOrCreateAsmCacheModelSo();
             List<string> dirties = model.GetDirtyScripts();
 
+            List<UnityEditorAssembly> compiledList = new List<UnityEditorAssembly>();
+
             // 编译
             foreach (var path in dirties) {
 
                 var asm = model.GetAssemblyWithPath(path);
+                if (compiledList.Contains(asm)) {
+                    continue;
+                }
 
                 // 编译 asm
                 EditorUtility.CompileCSharp(asm.sourceFiles, asm.allReferences, asm.defines, asm.outputPath);
                 Debug.Log($"编译 asm: {asm.name}, sourceFilesCount: {asm.sourceFiles.Length.ToString()}, refsCount: {asm.allReferences.Length.ToString()}, outPath: {asm.outputPath}");
 
                 invokeMethod.Invoke(invoker, new object[] { asm.outputPath, list });
+
+                compiledList.Add(asm);
 
             }
 
