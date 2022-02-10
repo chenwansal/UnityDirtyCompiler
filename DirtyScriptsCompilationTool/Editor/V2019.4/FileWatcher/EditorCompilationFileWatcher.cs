@@ -1,7 +1,8 @@
+#if UNITY_EDITOR
+#if UNITY_2019_4
 using System;
 using System.IO;
 using UnityEngine;
-using UnityEditor.Compilation;
 
 namespace FinalFrame.EditorTool {
 
@@ -9,14 +10,14 @@ namespace FinalFrame.EditorTool {
     [Serializable]
     public class EditorCompilationFileWatcher {
 
-        static FileSystemWatcher watcher;
+        FileSystemWatcher watcher;
 
         public delegate void OnScriptDirty(string scriptFilePath);
-        public static OnScriptDirty OnScriptDirtyHandle;
+        public event OnScriptDirty OnScriptDirtyHandle; 
 
-        public static void Init(string watchDir) {
+        public void Init(string watchDir) {
             watcher = new FileSystemWatcher();
-            watcher.Path = watchDir;
+            watcher.Path = watchDir;  
             watcher.Filter = "*.cs";
             watcher.IncludeSubdirectories = true;
             watcher.NotifyFilter = NotifyFilters.LastWrite;
@@ -24,15 +25,16 @@ namespace FinalFrame.EditorTool {
             watcher.Changed += FileChanged;
         }
 
-        public static void TearDown() {
+        public void TearDown() {
             if (watcher != null) {
-                watcher.Changed -= FileChanged;
+                watcher.Changed -= FileChanged; 
             }
         }
 
-        static void FileChanged(object sender, FileSystemEventArgs e) {
+        void FileChanged(object sender, FileSystemEventArgs e) {
 
             try {
+                
                 string dirName = Path.GetDirectoryName(e.FullPath);
                 string fileName = Path.GetFileName(e.FullPath);
                 string path = Path.Combine(dirName, fileName);
@@ -42,17 +44,19 @@ namespace FinalFrame.EditorTool {
                 if (OnScriptDirtyHandle != null) {
                     OnScriptDirtyHandle.Invoke(path);
                 } else {
-                    Debug.Log("OnScriptDirtyHandle 未注册");
+                    Debug.LogWarning("OnScriptDirtyHandle 未注册");
                 }
-            } catch(Exception err) {
+
+            } catch(Exception err) {  
+
                 Debug.LogError(err.ToString());
+
             }
 
-            // Assembly changedAsm = asmCacheModel.GetAssemblyWithPath(path);
-            // Debug.Log($"程序集改变: " + changedAsm.name);
-            // Debug.Log($"文件改变, Name: {e.Name}, Path: {e.FullPath}, ChangeType: {e.ChangeType.ToString()}");
         }
 
     }
 
 }
+#endif
+#endif

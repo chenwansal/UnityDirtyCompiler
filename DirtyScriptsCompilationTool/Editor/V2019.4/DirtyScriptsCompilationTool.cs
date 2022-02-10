@@ -1,4 +1,7 @@
+#if UNITY_EDITOR
+#if UNITY_2019_4
 using System;
+using System.IO;
 using System.Reflection;
 using System.Reflection.Emit;
 using System.Linq;
@@ -10,88 +13,75 @@ using UnityEditorAssembly = UnityEditor.Compilation.Assembly;
 
 namespace FinalFrame.EditorTool {
 
-    [InitializeOnLoad]
     public class DirtyScriptsCompilationTool {
 
-        static EditorCompilationAsmCacheModelSo asmCacheModel;
-        static volatile Queue<Action> dirtyHandleQueue = new Queue<Action>();
+        const string SHOTCUT_KEY = "%_T";
 
-        static DirtyScriptsCompilationTool() {
-            Reset();
-            EditorApplication.update += Execute;
-        }
+        static System.Diagnostics.Stopwatch sw;
 
-        [MenuItem("Tools/DirtyScriptsCompilation/Reset")]
-        static void Reset() {
+        static List<string> dirtyFiles;
 
-            // 清空
-            if (asmCacheModel != null) {
-                asmCacheModel.TearDown();
-                asmCacheModel = null;
-            }
+        [InitializeOnLoadMethod]
+        static void Setup() {
 
-            var models = Resources.FindObjectsOfTypeAll<EditorCompilationAsmCacheModelSo>();
-            foreach (var model in models) {
-                GameObject.DestroyImmediate(model);
-            }
+            dirtyFiles = new List<string>();
 
-            EditorCompilationFileWatcher.TearDown();
-
-            // 初始化
-            EditorCompilationFileWatcher.Init(Application.dataPath);
-            EditorCompilationFileWatcher.OnScriptDirtyHandle = (path) => dirtyHandleQueue.Enqueue(() => OnScriptDirty(path));
-
-            Debug.Log("DirtyScriptsCompilationTool 初始化完成");
-
-        }
-
-        static void Execute() {
-
-            if (dirtyHandleQueue == null) {
-                return;
-            }
-
-            while (dirtyHandleQueue.Count > 0) {
-                Action action = dirtyHandleQueue.Dequeue();
-                if (action != null) {
-                    action.Invoke();
-                }
-            }
+            EditorCompilationFileWatcher watcher = new EditorCompilationFileWatcher();
+            watcher.Init(Application.dataPath);
+            watcher.OnScriptDirtyHandle += OnScriptDirty;
 
         }
 
         static void OnScriptDirty(string scriptFilePath) {
-            EditorCompilationAsmCacheModelSo cacheModelSo = GetOrCreateAsmCacheModelSo();
-            cacheModelSo.SetDirty(scriptFilePath);
-        }
-
-        static EditorCompilationAsmCacheModelSo GetOrCreateAsmCacheModelSo() {
-            try {
-                if (asmCacheModel == null) {
-                    EditorCompilationAsmCacheModelSo[] models = Resources.FindObjectsOfTypeAll<EditorCompilationAsmCacheModelSo>();
-                    if (models != null) {
-                        asmCacheModel = models.FirstOrDefault();
-                    }
-                    if (asmCacheModel == null) {
-                        asmCacheModel = ScriptableObject.CreateInstance<EditorCompilationAsmCacheModelSo>();
-                    } else {
-                        // Debug.Log("找到已存在 So");
-                    }
-                    asmCacheModel.hideFlags = HideFlags.DontSave;
-                    asmCacheModel.Init();
-                }
-                return asmCacheModel;
-            } catch {
-                throw;
+            if (!dirtyFiles.Contains(scriptFilePath)) {
+                dirtyFiles.Add(scriptFilePath);
             }
         }
 
-        [MenuItem("Tools/DirtyScriptsCompilation/Compile %_T")]
+        [MenuItem("Tools/DirtyScriptsCompilation/Compile " + SHOTCUT_KEY)]
         static void CompileDirtyScripts() {
 
             var stopwatch = new System.Diagnostics.Stopwatch();
             stopwatch.Start();
 
+            // 1. 缓存所有未编译的代码文件
+            List<string> dirties = dirtyFiles;
+
+            // 2. 获取所有Runtime程序集
+            var asms = CompilationPipeline.GetAssemblies();
+            var pathToAsmDic = new Dictionary<string, UnityEditorAssembly>();
+            for (int i = 0; i < asms.Length; i += 1) {
+                var asm = asms[i];
+                for (int j = 0; j < asm.sourceFiles.Length; j += 1) {
+                    var file = asm.sourceFiles[j];
+                    string dirName = Path.GetDirectoryName(file);
+                    string fileName = Path.GetFileName(file);
+                    string path = Path.Combine(dirName, fileName);
+                    pathToAsmDic.Add(path, asm);
+                }
+            }
+
+            // 3. 查找所有有改动的程序集
+            List<UnityEditorAssembly> dirtyAsms = new List<UnityEditorAssembly>();
+            var arr = dirtyFiles.ToArray();
+            for (int i = 0; i < arr.Length; i += 1) {
+                var file = arr[i];
+                bool hasAsm = pathToAsmDic.TryGetValue(file, out UnityEditorAssembly tarAsm);
+                if (!hasAsm) {
+                    Debug.LogWarning($"该文件 {file} 暂不存在于程序集内");
+                } else {
+                    if (!dirtyAsms.Contains(tarAsm)) {
+                        dirtyAsms.Add(tarAsm);
+                    }
+                }
+            }
+
+            if (dirtyAsms.Count == 0) {
+                Debug.Log("无程序集需要编译");
+                return;
+            }
+
+            // 4. 编译
             // 找到触发编译完成的方法
             // 以及 out 方法参数 1
             MethodInfo invokeMethod = FindInvokerInEditorCompilation(out object invoker);
@@ -100,26 +90,13 @@ namespace FinalFrame.EditorTool {
             Type type = System.Reflection.Assembly.Load("UnityEditor").GetType("UnityEditor.Scripting.Compilers.CompilerMessage");
             var list = Activator.CreateInstance(typeof(List<>).MakeGenericType(type));
 
-            var model = GetOrCreateAsmCacheModelSo();
-            List<string> dirties = model.GetDirtyScripts();
-
-            List<UnityEditorAssembly> compiledList = new List<UnityEditorAssembly>();
-
-            // 编译
-            foreach (var path in dirties) {
-
-                var asm = model.GetAssemblyWithPath(path);
-                if (compiledList.Contains(asm)) {
-                    continue;
-                }
+            foreach (var asm in dirtyAsms) {
 
                 // 编译 asm
                 EditorUtility.CompileCSharp(asm.sourceFiles, asm.allReferences, asm.defines, asm.outputPath);
                 Debug.Log($"编译 asm: {asm.name}, sourceFilesCount: {asm.sourceFiles.Length.ToString()}, refsCount: {asm.allReferences.Length.ToString()}, outPath: {asm.outputPath}");
 
                 invokeMethod.Invoke(invoker, new object[] { asm.outputPath, list });
-
-                compiledList.Add(asm);
 
             }
 
@@ -133,8 +110,7 @@ namespace FinalFrame.EditorTool {
             }
 
             // 清空 DirtyScripts
-            dirtyHandleQueue.Clear();
-            model.CleanDirtyScripts();
+            dirtyFiles.Clear();
 
         }
 
@@ -144,7 +120,7 @@ namespace FinalFrame.EditorTool {
 
             // 找到事件
             EventInfo eventInfo = compilationPipeline.GetEvent("assemblyCompilationFinished", BindingFlags.Static | BindingFlags.Public);
-            
+
             // 根据事件找到触发方法
             Type handlerType = eventInfo.EventHandlerType;
             MethodInfo invokeMethod = handlerType.GetMethod("Invoke");
@@ -180,3 +156,5 @@ namespace FinalFrame.EditorTool {
     }
 
 }
+#endif
+#endif
